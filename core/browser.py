@@ -9,7 +9,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
-from playwright._impl._api_structures import SetCookieParam
 from playwright.async_api import (
     Browser,
     BrowserContext,
@@ -63,7 +62,17 @@ class BrowserCore:
         self.cache_dir = data_dir / "screenshot_cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
+        self.browser_mode: str = self.config.get("browser_mode", "embedded")
+        if self.browser_mode not in {"embedded", "local_cdp"}:
+            raise ValueError(f"不支持的浏览器接入模式: {self.browser_mode}")
+
+        self.cdp_url: str = self.config.get("cdp_url", "http://127.0.0.1:9222")
+        if self.browser_mode == "local_cdp" and not self.cdp_url:
+            raise ValueError("local_cdp 模式下 cdp_url 不能为空")
+
         self.browser_type: str = self.config.get("browser_type", "firefox")
+        if self.browser_mode == "local_cdp":
+            self.browser_type = "chromium"
         if self.browser_type not in self._BROWSER_ENGINES:
             raise ValueError(f"不支持的浏览器类型: {self.browser_type}")
 
@@ -76,6 +85,7 @@ class BrowserCore:
         self.page: Page | None = None
 
         self._terminated = False
+        self._is_cdp_mode = self.browser_mode == "local_cdp"
 
         # ===== 核心防护 =====
         self._op_lock = asyncio.Lock()
@@ -91,9 +101,15 @@ class BrowserCore:
         :param timeout: 单次操作超时时间
         :param retries: 重试次数
         """
+        timeout_raw = self.config.get("timeout", 30)
+        try:
+            timeout = max(float(timeout_raw), 1.0)
+        except (TypeError, ValueError):
+            timeout = 30.0
+
         for attempt in range(retries + 1):
             try:
-                return await asyncio.wait_for(coro, self.config["timeout"])
+                return await asyncio.wait_for(coro, timeout)
             except asyncio.TimeoutError as e:
                 if attempt < retries:
                     await asyncio.sleep(0.5)  # 等待再重试
@@ -134,8 +150,24 @@ class BrowserCore:
     async def initialize(self):
         async with self._op_lock:
             self.playwright = await async_playwright().start()
-            engine = getattr(self.playwright, self.browser_type)
 
+            if self._is_cdp_mode:
+                self.browser = await self.playwright.chromium.connect_over_cdp(self.cdp_url)
+                if not self.browser.contexts:
+                    raise RuntimeError(
+                        "CDP 连接成功但未获取到浏览器上下文，请检查本地 Chromium 启动参数（建议带 --user-data-dir）"
+                    )
+
+                self.context = self.browser.contexts[0]
+                self.all_pages = list(self.context.pages)
+                if self.all_pages:
+                    self.current_index = 0
+                    self.page = self.all_pages[0]
+                else:
+                    await self._ensure_page()
+                return
+
+            engine = getattr(self.playwright, self.browser_type)
             self.browser = await engine.launch(
                 headless=True,
                 **self._get_launch_options(self.browser_type),
@@ -147,12 +179,9 @@ class BrowserCore:
             )
 
             raw_cookies = self.cookie.load_cookies()
-            cookies = [
-                SetCookieParam(**{k: v for k, v in c.items() if v is not None})
-                for c in raw_cookies
-            ]
+            cookies = [{k: v for k, v in c.items() if v is not None} for c in raw_cookies]
             if cookies:
-                await self.context.add_cookies(cookies)
+                await self.context.add_cookies(cookies)  # type: ignore[arg-type]
 
             await self._ensure_page()
 
@@ -175,23 +204,27 @@ class BrowserCore:
                 except Exception:
                     pass
 
-            # 保存 cookies
-            await self.save_cookies()
+            # 保存 cookies（local_cdp 下仅尽力保存，不影响断连）
+            try:
+                await self.save_cookies()
+            except Exception:
+                pass
 
-            # 关闭所有 Page
-            for page in self.all_pages:
-                await safe_close(page)
+            if not self._is_cdp_mode:
+                # embedded 模式下关闭所有 Page/context/browser
+                for page in self.all_pages:
+                    await safe_close(page)
+
+                await safe_close(self.context)
+                await safe_close(self.browser)
+
             self.all_pages.clear()
             self.current_index = None
             self.page = None
-
-            # 关闭 context / browser / playwright
-            await safe_close(self.context)
             self.context = None
-
-            await safe_close(self.browser)
             self.browser = None
 
+            # local_cdp 下 stop playwright 仅断开连接，不会强杀本地浏览器进程
             await safe_close(self.playwright, "stop")
             self.playwright = None
 
@@ -527,4 +560,40 @@ class BrowserCore:
             page = await self._ensure_page()
             await page.go_forward()
             await page.wait_for_load_state("load")
+            return None
+
+    async def chat_send(
+        self,
+        text: str,
+        input_selector: str,
+        send_selector: str = "",
+        wait_ms: int = 1500,
+    ) -> str | None:
+        async with self._op_lock:
+            page = await self._ensure_page()
+            await page.wait_for_load_state("domcontentloaded")
+
+            selector = input_selector.strip() or "textarea, div[contenteditable='true'], input[type='text']"
+            el = await page.query_selector(selector)
+            if el is None:
+                return f"未找到输入框，请检查 chat_input_selector：{selector}"
+
+            await el.click()
+            try:
+                await page.keyboard.press("Control+A")
+                await page.keyboard.press("Backspace")
+            except Exception:
+                pass
+
+            await page.keyboard.type(text, delay=20)
+
+            if send_selector.strip():
+                btn = await page.query_selector(send_selector)
+                if btn is None:
+                    return f"未找到发送按钮，请检查 chat_send_selector：{send_selector}"
+                await btn.click()
+            else:
+                await page.keyboard.press("Enter")
+
+            await asyncio.sleep(max(wait_ms, 0) / 1000)
             return None
