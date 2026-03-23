@@ -1,22 +1,19 @@
 # \astrbot\core\browser.py
 
+from __future__ import annotations
+
 import asyncio
 import json
+import platform
 import shutil
 import uuid
 from collections.abc import Coroutine, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
-from playwright.async_api import (
-    Browser,
-    BrowserContext,
-    Cookie,
-    Page,
-    Playwright,
-    async_playwright,
-)
+if TYPE_CHECKING:
+    from playwright.async_api import Browser, BrowserContext, Cookie, Page, Playwright
 
 T = TypeVar("T")
 
@@ -147,8 +144,37 @@ class BrowserCore:
     # 生命周期
     # ======================================================
 
+    async def _restore_cookies(self):
+        """恢复本地持久化 cookies，异常 cookie 自动跳过"""
+        if not self.context:
+            return
+
+        raw_cookies = self.cookie.load_cookies()
+        cookies = [{k: v for k, v in c.items() if v is not None} for c in raw_cookies]
+        if not cookies:
+            return
+
+        try:
+            await self.context.add_cookies(cookies)  # type: ignore[arg-type]
+            return
+        except Exception:
+            pass
+
+        for ck in cookies:
+            try:
+                await self.context.add_cookies([ck])  # type: ignore[arg-type]
+            except Exception:
+                continue
+
     async def initialize(self):
         async with self._op_lock:
+            try:
+                from playwright.async_api import async_playwright
+            except ModuleNotFoundError as e:
+                raise RuntimeError(
+                    "缺少 playwright 运行时，请先执行命令：安装浏览器"
+                ) from e
+
             self.playwright = await async_playwright().start()
 
             if self._is_cdp_mode:
@@ -159,6 +185,8 @@ class BrowserCore:
                     )
 
                 self.context = self.browser.contexts[0]
+                await self._restore_cookies()
+
                 self.all_pages = list(self.context.pages)
                 if self.all_pages:
                     self.current_index = 0
@@ -177,11 +205,7 @@ class BrowserCore:
                 viewport=self.config["viewport_size"] or None,
                 proxy=self.config["proxy"] or None,
             )
-
-            raw_cookies = self.cookie.load_cookies()
-            cookies = [{k: v for k, v in c.items() if v is not None} for c in raw_cookies]
-            if cookies:
-                await self.context.add_cookies(cookies)  # type: ignore[arg-type]
+            await self._restore_cookies()
 
             await self._ensure_page()
 
@@ -580,7 +604,10 @@ class BrowserCore:
 
             await el.click()
             try:
-                await page.keyboard.press("Control+A")
+                select_all_hotkey = (
+                    "Meta+A" if platform.system().lower() == "darwin" else "Control+A"
+                )
+                await page.keyboard.press(select_all_hotkey)
                 await page.keyboard.press("Backspace")
             except Exception:
                 pass

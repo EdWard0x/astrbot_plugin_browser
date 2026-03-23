@@ -56,9 +56,14 @@ class BrowserPlugin(Star):
     ):
         """安装 Playwright 浏览器依赖"""
         if self.config.get("browser_mode", "embedded") == "local_cdp":
-            yield event.plain_result(
-                "当前为 local_cdp 模式，无需安装内置浏览器。请先启动本地 Chromium 并开启 9222 调试端口。"
-            )
+            yield event.plain_result("当前为 local_cdp 模式，正在检查 playwright 运行时...")
+            ok, msg = await self.downloader.ensure_playwright_runtime()
+            if ok:
+                yield event.plain_result(
+                    "playwright 运行时已就绪。请确保本地 Chromium 已开启 CDP 端口（默认 9222）。"
+                )
+            else:
+                yield event.plain_result(msg)
             return
 
         browser_type = browser_type or self.config["browser_type"]

@@ -40,7 +40,7 @@ _✨ [astrbot](https://github.com/AstrBotDevs/AstrBot) 浏览器对接插件 ✨
 > `local_cdp` 只需要 `cdp_url`，**不需要在插件里配置浏览器可执行文件路径**。
 > 插件只负责连接你本机已开启的 CDP 端口；你用什么系统启动浏览器由你自己决定。
 
-`local_cdp` 模式下无需执行 `安装浏览器`。
+`local_cdp` 模式下不需要下载内置浏览器内核；但首次使用前可执行一次 `安装浏览器`，用于安装/检查 playwright Python 运行时。
 
 #### Linux 启动示例(较新版本的Linux需要加上--no-sandbox)
 
@@ -89,7 +89,7 @@ playwright install-deps
 2. 输入文本并发送（优先点发送按钮，否则按回车）
 3. 返回当前页面截图
 
-相关配置项(无需关心)：
+相关配置项：
 
 - `chat_input_selector`：输入框 CSS 选择器（支持逗号分隔多个选择器）
 - `chat_send_selector`：发送按钮 CSS 选择器（留空则回车发送）
